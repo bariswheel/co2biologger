@@ -1,0 +1,34 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.pyo
+
+# Virtualenv
+env/
+.venv/
+ENV/
+
+# Data files
+*.csv
+*.tsv
+*.log
+*.json
+
+# Jupyter and notebooks (in case you ever use them)
+.ipynb_checkpoints/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.swp
+*.tmp
+
+# VSCode or IDE configs
+.vscode/
+.idea/
+
