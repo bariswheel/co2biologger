@@ -2,6 +2,7 @@
 # health_ingest.py
 from fastapi import FastAPI, Request
 import pandas as pd, pathlib, datetime as dt, json
+from zoneinfo import ZoneInfo           # ← NEW: local-time helper
 
 DATA = pathlib.Path("data"); DATA.mkdir(exist_ok=True)
 app = FastAPI()
@@ -9,18 +10,20 @@ app = FastAPI()
 @app.post("/health")
 async def sink(req: Request):
     payload = await req.json()
-    ts = pd.Timestamp.utcnow()           # arrival time
 
-    raw_dir = DATA / "raw";  raw_dir.mkdir(exist_ok=True)
+    # use local (SF) time so filenames roll at local midnight
+    ts = pd.Timestamp.now(tz=ZoneInfo("America/Los_Angeles"))
+
+    raw_dir  = DATA / "raw";  raw_dir.mkdir(exist_ok=True)
     flat_dir = DATA / "flat"; flat_dir.mkdir(exist_ok=True)
 
-    # ---- 1.  archive the full blob (as before) ----
+    # ---- 1. archive full blob ----
     raw_fn = raw_dir / f"bio_{ts.date()}.csv"
     pd.DataFrame([{"data": payload, "time": ts}]).to_csv(
         raw_fn, mode="a", header=not raw_fn.exists(), index=False
     )
 
-    # ---- 2.  flatten any heart-rate objects ----
+    # ---- 2. flatten any heart-rate objects ----
     rows = []
     for metric in payload.get("metrics", []):
         if metric.get("name") != "heart_rate":
@@ -41,4 +44,3 @@ async def sink(req: Request):
         )
 
     return {"status": "ok", "rows_written": len(rows)}
-
