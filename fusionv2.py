@@ -87,36 +87,40 @@ CO2_DIR  = pathlib.Path("~/data/co2").expanduser()
 FLAT_DIR = pathlib.Path("~/biologger/data/flat").expanduser()
 OUT_DIR  = pathlib.Path("~/biologger").expanduser()
 
-# ── newest CO₂ file ──────────────────────────────────────────────────────────
+# ── load & clean CO₂ ─────────────────────────────────────────────────────────
 co2_path = max(CO2_DIR.glob("co2_*.json"), key=lambda p: p.stat().st_mtime)
-
 records = []
 with co2_path.open() as f:
     for line in f:
         line = line.strip()
         if line in ("[", "]", ""):
-            continue                      # skip JSON-array brackets & blanks
+            continue
         if line.endswith(","):
-            line = line[:-1]              # drop trailing comma
+            line = line[:-1]
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError:
-            pass                         # ignore incomplete last line
+            pass
 
 co2 = pd.DataFrame.from_records(records)
+# parse as UTC then drop tzinfo → naive in UTC
 co2["timestamp"] = pd.to_datetime(co2["timestamp"], utc=True).dt.tz_convert(None)
 
-co2_1m = (co2.set_index("timestamp")
-             .resample("60s").mean()
-             .dropna()
-             .reset_index())
+co2_1m = (
+    co2.set_index("timestamp")
+        .resample("60s").mean()
+        .dropna()
+        .reset_index()
+)
 
-# ── newest flat HR file ──────────────────────────────────────────────────────
+# ── load & clean heart-rate ─────────────────────────────────────────────────
 hr_path = max(FLAT_DIR.glob("hr_*.csv"), key=lambda p: p.stat().st_mtime)
-hr      = pd.read_csv(hr_path)
-hr["timestamp"] = pd.to_datetime(hr["timestamp"])
+hr = pd.read_csv(hr_path)
 
-# ── merge (≤ 90 s) ───────────────────────────────────────────────────────────
+# parse as UTC then drop tz → naive
+hr["timestamp"] = pd.to_datetime(hr["timestamp"], utc=True).dt.tz_convert(None)
+
+# ── merge with ±90 s tolerance ───────────────────────────────────────────────
 merged = pd.merge_asof(
     co2_1m.sort_values("timestamp"),
     hr.sort_values("timestamp"),
@@ -125,9 +129,13 @@ merged = pd.merge_asof(
     tolerance=pd.Timedelta("90s"),
 )
 
-# ── write out ────────────────────────────────────────────────────────────────
+# ── write fused CSV ─────────────────────────────────────────────────────────
 out = OUT_DIR / f"fused_{dt.date.today()}.csv"
 merged.to_csv(out, index=False)
 
-print(f"✅  Wrote {out}  |  rows: {len(merged):,}  |  HR matches: "
-      f"{merged['hr_bpm'].notna().sum():,}")
+print(
+    f"✅  Wrote {out}  |  rows: {len(merged):,}  | "
+    f"HR matches: {merged['hr_bpm'].notna().sum():,}"
+)
+
+
