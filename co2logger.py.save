@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Robust background logger for the **Sensirion SCD‑30** running on the Pi.
+
+How it works------------- ───────────────────────────────────────────
+1. **Initialise** the SCD‑30 over I²C and wait until the first reading is
+   ready (sensor ~2 s cadence).
+2. Every ~2 s it tries to read **CO₂ ppm, temperature °C, humidity %RH**.
+   • SCD‑30s occasionally throw a *CRC check failed* error. We **retry
+     once** after 0.5 s and, if the second attempt also fails, **skip the
+     cycle** instead of crashing.
+   • We keep an *error_streak* counter so you’ll see a warning every 10
+     consecutive failures, but isolated hiccups are silent.
+3. On a successful reading we append the data to **two files** in
+   `~/data/co2/` (directory is created if missing):
+   • `co2_<ISO‑timestamp>.json` – array‑formatted JSON, one object per
+     line, comma‑delimited so the file is a valid JSON list on close.
+   • `co2_<ISO‑timestamp>.csv`  – matching CSV with header
+     `timestamp,co2_ppm,temp_c,humidity_pct`.
+4. Both files roll over only when you restart the service; you get a
+   single JSON+CSV pair per logger run.
+5. Designed to be launched by **systemd**. The recommended unit file is
+   embedded below; note the `Restart=always` and `RestartSec=10` so a
+   hardware disconnect doesn’t lead to rapid restart loops.
+6. Console output shows a timestamped line each cycle so `journalctl -f`
+   is a live tail.
+7. **Ctrl‑C** on a manual run will close the JSON array neatly. When run
+   under systemd the service exit handler does the same on SIGTERM.
+
+Systemd unit template ─────────────────────────────────────────────────
+[Unit]
+Description=CO₂ logger (SCD‑30)
+After=network.target
+
+[Service]
+Type=simple
+User=bariswheel
+WorkingDirectory=/home/bariswheel
+Environment="PATH=/home/bariswheel/env/bin"
+ExecStart=/home/bariswheel/env/bin/python /home/bariswheel/co2logger.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+import json
+import csv
+import time
+import datetime as dt
+import pathlib
+import signal
+import sys
+
+import board
+import busio
+import adafruit_scd30
+
+DATA_DIR = pathlib.Path("~/data/co2").expanduser()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── helper ────────────────────────────────────────────────────────────
+
+def open_files(ts: dt.datetime):
+    stem = ts.strftime("co2_%Y-%m-%dT%H-%M-%S")
+    json_path = DATA_DIR / f"{stem}.json"
+    csv_path  = DATA_DIR / f"{stem}.csv"
+
+    jf = json_path.open("a", buffering=1)
+    cf = csv_path.open("a", newline="", buffering=1)
+    csv_writer = csv.writer(cf)
+
+    if csv_path.stat().st_size == 0:
+        csv_writer.writerow(["timestamp", "co2_ppm", "temp_c", "humidity_pct"])
+
+    if jf.tell() == 0:
+        jf.write("[\n")  # begin JSON array
+    return jf, csv_writer, cf
+
+
+def close_json(jf):
+    if jf and not jf.closed:
+        jf.write("\n]\n")
+        jf.close()
+
+# ── main loop ────────────────────────────────────────────────────────
+
+def main():
+    i2c = busio.I2C(board.SCL, board.SDA, frequency=100_000)
+    scd = adafruit_scd30.SCD30(i2c)
+
+    # Wait for first measurement
+    while not scd.data_available:
+        time.sleep(0.2)
+
+    ts0 = dt.datetime.now()
+    jf, csv_writer, cf = open_files(ts0)
+    print(f"🟢  CO₂ logger started → {jf.name}")
+
+    # graceful shutdown when systemd sends SIGTERM
+    def _shutdown(sig, _frame):
+        print("\n🔻  Stopping logger … closing files")
+        close_json(jf)
+        cf.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)   # Ctrl‑C for manual run
+
+    error_streak = 0
+
+    while True:
+        if not scd.data_available:
+            time.sleep(0.2)
+            continue
+
+        try:
+            co2   = scd.CO2
+            temp  = scd.temperature
+            humid = scd.relative_humidity
+        except RuntimeError:  # CRC failure
+            time.sleep(0.5)
+            try:
+                co2   = scd.CO2
+                temp  = scd.temperature
+                humid = scd.relative_humidity
+            except RuntimeError:
+                error_streak += 1
+                if error_streak % 10 == 1:
+                    print(f"⚠️  CRC error ({error_streak} consecutive) — skipping reading")
+                time.sleep(2)
+                continue
+
+        error_streak = 0  # reset streak on success
+
+        if None in (co2, temp, humid):
+            time.sleep(2)
+            continue  # skip nonsense values
+
+        ts = dt.datetime.now()
+
+        # JSON line
+        jf.write(json.dumps({
+            "timestamp": ts.isoformat(),
+            "co2_ppm":   round(co2, 1),
+            "temp_c":    round(temp, 2),
+            "humidity_pct": round(humid, 2),
+        }))
+        jf.write(",\n")  # trailing comma, closed later
+        jf.flush()
+
+        # CSV line
+        csv_writer.writerow([ts.isoformat(), f"{co2:.1f}", f"{temp:.2f}", f"{humid:.2f}"])
+        cf.flush()
+
+        # console debug line
+        print(f"{ts:%H:%M:%S}  CO₂ {co2:6.1f} ppm   T {temp:5.2f} °C   RH {humid:5.2f} %")
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()

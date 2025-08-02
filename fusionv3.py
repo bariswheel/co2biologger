@@ -149,10 +149,10 @@ for raw_csv in sorted(RAW_DIR.glob("bio_*.csv"), key=lambda p: p.stat().st_mtime
 
     pd.set_option("display.width", 120)
     print("── First 50 rows ──")
-    print(merged.head(50).to_string(index=False))
+    print(merged.tail(100).to_string(index=False))
 
-    with_hr = merged[merged["hr_bpm"].notna()].head(50)
+    with_hr = merged[merged["hr_bpm"].notna()].tail(100)
     if not with_hr.empty:
-        print("\n── First 50 rows *with HR* ──")
+        print("\n── Last 100 rows *with HR* ──")
         print(with_hr.to_string(index=False))
     print("\n" + "═"*80 + "\n")
